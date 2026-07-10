@@ -661,7 +661,7 @@ namespace NotepadReplacer
             {
                 bool elevated = IsAdmin();
                 btnAdmin.Visible = !elevated;
-                bool active = ReadDebuggerAnyView().IndexOf("NotepadReplacer", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool active = ReadDebuggerAnyView().IndexOf(Path.GetFileNameWithoutExtension(Application.ExecutablePath),StringComparison.OrdinalIgnoreCase) >= 0;
                 string editor = EditorPath();
                 string editorName = string.IsNullOrEmpty(editor) ? "(未记录)" : Path.GetFileName(editor);
                 currentEditorPath = active ? editor : "";
