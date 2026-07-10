@@ -14,6 +14,7 @@ namespace NotepadReplacer
     {
         const string IFEO_KEY = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\notepad.exe";
         static string ConfigFile { get { return Path.ChangeExtension(Application.ExecutablePath, ".cfg"); } }
+        static string AppName { get { return Path.GetFileNameWithoutExtension(Application.ExecutablePath); } }
         static string _cachedEditor = null;
         static List<string> _cachedHistory = null;
 
@@ -22,13 +23,13 @@ namespace NotepadReplacer
         {
             if (args.Length > 0 && args[0] == "/enable")
             {
-                try { DoEnable(); MessageBox.Show("已启用替换：记事本已重定向到你设置的编辑器。", "NotepadReplacer"); }
+                try { DoEnable(); MessageBox.Show("已启用替换：记事本已重定向到你设置的编辑器。", AppName); }
                 catch (Exception ex) { MessageBox.Show("启用失败：" + ex.Message, "错误"); }
                 return;
             }
             if (args.Length > 0 && args[0] == "/restore")
             {
-                try { DoRestore(); MessageBox.Show("已恢复默认记事本。", "NotepadReplacer"); }
+                try { DoRestore(); MessageBox.Show("已恢复默认记事本。", AppName); }
                 catch (Exception ex) { MessageBox.Show("恢复失败：" + ex.Message, "错误"); }
                 return;
             }
@@ -194,6 +195,7 @@ namespace NotepadReplacer
 
         static void DoRestore()
         {
+            string currentExeName = AppName;
             foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
             {
                 using (var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view))
@@ -201,7 +203,9 @@ namespace NotepadReplacer
                 {
                     if (k == null) continue;
                     var dbg = k.GetValue("Debugger") as string;
-                    if (dbg != null && dbg.IndexOf("NotepadReplacer", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (dbg == null) continue;
+                    // 匹配当前 exe 名称（支持改名场景）
+                    if (dbg.IndexOf(currentExeName, StringComparison.OrdinalIgnoreCase) >= 0)
                         k.DeleteValue("Debugger", false);
                 }
             }
@@ -261,7 +265,7 @@ namespace NotepadReplacer
 
             void InitializeComponent()
             {
-                this.Text = "记事本替换工具 · NotepadReplacer";
+                this.Text = AppName;
                 this.ClientSize = new Size(600, 570);
                 this.FormBorderStyle = FormBorderStyle.FixedSingle;
                 this.StartPosition = FormStartPosition.CenterScreen;
@@ -435,10 +439,10 @@ namespace NotepadReplacer
                 catch { }
                 using (var f = new Font("Segoe UI", 14, FontStyle.Bold))
                 using (var b = new SolidBrush(Color.White))
-                    g.DrawString("记事本替换工具", f, b, 64, 13);
+                    g.DrawString("NotepadReplacer", f, b, 64, 13);
                 using (var f2 = new Font("Segoe UI", 9))
                 using (var b2 = new SolidBrush(Color.FromArgb(0xE0, 0xE7, 0xFF)))
-                    g.DrawString("NotepadReplacer · 用你喜欢的编辑器接管系统记事本", f2, b2, 64, 41);
+                    g.DrawString(AppName + " · 用你喜欢的编辑器接管系统记事本", f2, b2, 64, 41);
             }
 
             void LstDraw(object s, DrawItemEventArgs e)
@@ -661,10 +665,11 @@ namespace NotepadReplacer
             {
                 bool elevated = IsAdmin();
                 btnAdmin.Visible = !elevated;
-                bool active = ReadDebuggerAnyView().IndexOf(Path.GetFileNameWithoutExtension(Application.ExecutablePath),StringComparison.OrdinalIgnoreCase) >= 0;
+                bool active = ReadDebuggerAnyView().IndexOf(AppName, StringComparison.OrdinalIgnoreCase) >= 0;
                 string editor = EditorPath();
                 string editorName = string.IsNullOrEmpty(editor) ? "(未记录)" : Path.GetFileName(editor);
                 currentEditorPath = active ? editor : "";
+                this.Text = AppName + " · " + (active ? "已启用替换" : "未启用替换") + " · " + editorName;
                 lstEditors.Invalidate();
 
                 if (active && elevated)
@@ -745,7 +750,7 @@ namespace NotepadReplacer
             {
                 public AboutForm()
                 {
-                    this.Text = "About NotepadReplacer";
+                    this.Text = "About " + AppName;
                     this.ClientSize = new Size(560, 460);
                     this.FormBorderStyle = FormBorderStyle.FixedSingle;
                     this.StartPosition = FormStartPosition.CenterParent;
@@ -766,10 +771,10 @@ namespace NotepadReplacer
                         try { using (var ic = Icon.ExtractAssociatedIcon(Application.ExecutablePath)) g.DrawImage(ic.ToBitmap(), new Rectangle(16, 19, 38, 38)); } catch { }
                         using (var f = new Font("Segoe UI", 14, FontStyle.Bold))
                         using (var b = new SolidBrush(Color.White))
-                            g.DrawString("记事本替换工具", f, b, 64, 14);
+                            g.DrawString("NotepadReplacer", f, b, 64, 14);
                         using (var f2 = new Font("Segoe UI", 9))
                         using (var b2 = new SolidBrush(Color.FromArgb(0xE0, 0xE7, 0xFF)))
-                            g.DrawString("NotepadReplacer · 用你喜欢的编辑器接管系统记事本", f2, b2, 64, 42);
+                            g.DrawString(AppName + " · 用你喜欢的编辑器接管系统记事本", f2, b2, 64, 42);
                     };
                     this.Controls.Add(pnl);
 
