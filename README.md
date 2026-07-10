@@ -8,6 +8,7 @@
 启用替换 → 系统调用记事本时自动跳转到你的编辑器并正确打开文件
 恢复默认 → 一键还原
 ```
+<img width="606" height="602" alt="SnowShot_2026-07-11_04-00-43" src="https://github.com/user-attachments/assets/a237c6c5-49a1-4189-88b7-65d64b035bc0" />
 
 ## 特点
 
