@@ -13,31 +13,85 @@ namespace NotepadReplacer
     public class Program
     {
         const string IFEO_KEY = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\notepad.exe";
+        const string SEP = "  ->  ";
+        static readonly RegistryView[] RegViews = { RegistryView.Registry64, RegistryView.Registry32 };
+
         static string ConfigFile { get { return Path.ChangeExtension(Application.ExecutablePath, ".cfg"); } }
         static string AppName { get { return Path.GetFileNameWithoutExtension(Application.ExecutablePath); } }
-        static string _cachedEditor = null;
-        static List<string> _cachedHistory = null;
+
+        static string _cachedEditor = "";
+        static List<string> _cachedHistory = new List<string>();
+        static bool _configLoaded;
+
+        // --- Cached GDI resources (avoid per-paint allocation) ---
+        static readonly Font FntTitle    = new Font("Segoe UI", 14, FontStyle.Bold);
+        static readonly Font FntSub9     = new Font("Segoe UI", 9f);
+        static readonly Font FntItemName = new Font("Segoe UI", 10.5f, FontStyle.Bold);
+        static readonly Font FntItemPath = new Font("Segoe UI", 8.5f);
+        static readonly Font FntInitial  = new Font("Segoe UI", 13, FontStyle.Bold);
+        static readonly Font FntTipTitle = new Font("Segoe UI", 10f, FontStyle.Bold);
+        static readonly Font FntTipBody  = new Font("Segoe UI", 9f);
+        static readonly StringFormat SfCenter = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+        static readonly StringFormat SfTrim   = new StringFormat { Trimming = StringTrimming.EllipsisCharacter };
+
+        // --- Colors ---
+        static readonly Color CAccent   = Color.FromArgb(0x25, 0x63, 0xEB);
+        static readonly Color CAccentHi = Color.FromArgb(0x1D, 0x4E, 0xD8);
+        static readonly Color CAccentBg = Color.FromArgb(0xEE, 0xF2, 0xFF);
+        static readonly Color CText     = Color.FromArgb(0x11, 0x18, 0x27);
+        static readonly Color CSub      = Color.FromArgb(0x6B, 0x72, 0x80);
+        static readonly Color CGreen    = Color.FromArgb(0x16, 0xA3, 0x4A);
+        static readonly Color CGreenBg  = Color.FromArgb(0xDC, 0xFC, 0xE7);
+        static readonly Color CGrayBg   = Color.FromArgb(0xF3, 0xF4, 0xF6);
+        static readonly Color CAmber    = Color.FromArgb(0xD9, 0x77, 0x06);
+        static readonly Color CAmberBg  = Color.FromArgb(0xFE, 0xF3, 0xC7);
+        static readonly Color CHdrEnd   = Color.FromArgb(0x4F, 0x46, 0xE5);
+        static readonly Color CHdrSub   = Color.FromArgb(0xE0, 0xE7, 0xFF);
+        static readonly Color CAltRow   = Color.FromArgb(0xF8, 0xFA, 0xFC);
+        static readonly Color CDkGreen  = Color.FromArgb(0x14, 0x5A, 0x32);
+        static readonly Color CDkAmber  = Color.FromArgb(0x92, 0x40, 0x06);
+        static readonly Color CGrayText = Color.FromArgb(0x37, 0x41, 0x51);
+        static readonly Color CRed      = Color.FromArgb(0xB9, 0x1C, 0x1C);
+        static readonly Color CRedBg    = Color.FromArgb(0xFE, 0xE2, 0xE2);
+        static readonly Color CTipBody  = Color.FromArgb(0x2B, 0x34, 0x44);
+
+        const string DEV_NAME  = "godsq";
+        const string DEV_EMAIL = "godsq@qq.com";
+        const string LICENSE   = "MIT License";
+
+        const string ELEV_ERR_FMT =
+            "提权未成功，{0}。\n\n可能原因：\n• UAC 提权被取消；\n• 被安全软件 / 杀毒软件 / Windows Defender 拦截了提权或本程序。\n\n请关闭拦截或将本程序加入白名单后重试。\n\n技术信息：";
+        const string PERM_ERR_FMT =
+            "写入注册表被拒绝，{0}。\n\n常见原因：\n• 未以管理员身份运行；\n• 被安全软件 / 杀毒软件 / Windows Defender 拦截了对 IFEO 注册表的修改。\n\n请以管理员身份运行本程序或将本程序加入白名单后重试。";
+
+        #region Entry Point
 
         [STAThread]
         static void Main(string[] args)
         {
-            if (args.Length > 0 && args[0] == "/enable")
+            if (args.Length > 0)
             {
-                try { DoEnable(); Environment.ExitCode = 0; }
-                catch (Exception ex) { MessageBox.Show("启用失败：" + ex.Message, "错误"); Environment.ExitCode = 1; }
-                return;
+                switch (args[0])
+                {
+                    case "/enable":  TryRun(DoEnable, "启用失败"); return;
+                    case "/restore": TryRun(DoRestore, "恢复失败"); return;
+                    default:         Launcher(args); return;
+                }
             }
-            if (args.Length > 0 && args[0] == "/restore")
-            {
-                try { DoRestore(); Environment.ExitCode = 0; }
-                catch (Exception ex) { MessageBox.Show("恢复失败：" + ex.Message, "错误"); Environment.ExitCode = 1; }
-                return;
-            }
-            if (args.Length > 0) { Launcher(args); return; }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new MainForm());
         }
+
+        static void TryRun(Action action, string errPrefix)
+        {
+            try { action(); Environment.ExitCode = 0; }
+            catch (Exception ex) { MessageBox.Show(errPrefix + "：" + ex.Message, "错误"); Environment.ExitCode = 1; }
+        }
+
+        #endregion
+
+        #region Admin Check (P/Invoke)
 
         [DllImport("advapi32.dll", SetLastError = true)]
         static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
@@ -60,44 +114,36 @@ namespace NotepadReplacer
                 try
                 {
                     int len;
-                    if (!GetTokenInformation(token, TokenElevation, ptr, 4, out len))
-                        return false;
-                    return Marshal.ReadInt32(ptr) != 0;
+                    return GetTokenInformation(token, TokenElevation, ptr, 4, out len) && Marshal.ReadInt32(ptr) != 0;
                 }
                 finally { Marshal.FreeHGlobal(ptr); }
             }
             catch { return false; }
         }
 
+        #endregion
+
+        #region Config Persistence
+
         static void EnsureConfigLoaded()
         {
-            if (_cachedEditor != null) return;
-            _cachedEditor = "";
-            _cachedHistory = new List<string>();
+            if (_configLoaded) return;
+            _configLoaded = true;
             try
             {
-                if (File.Exists(ConfigFile))
-                {
-                    var lines = File.ReadAllLines(ConfigFile);
-                    if (lines.Length >= 1)
+                if (!File.Exists(ConfigFile)) { SaveConfig(); return; }
+                var lines = File.ReadAllLines(ConfigFile);
+                if (lines.Length >= 1 && !string.Equals(lines[0].Trim(), GetMachineId(), StringComparison.OrdinalIgnoreCase))
+                { SaveConfig(); return; }
+                if (lines.Length >= 2) _cachedEditor = lines[1].Trim();
+                if (lines.Length >= 3 && !string.IsNullOrWhiteSpace(lines[2]))
+                    foreach (var p in lines[2].Split('|'))
                     {
-                        string savedMachine = lines[0].Trim();
-                        if (!string.Equals(savedMachine, GetMachineId(), StringComparison.OrdinalIgnoreCase))
-                        { SaveConfig(); return; }
+                        var t = p.Trim();
+                        if (!string.IsNullOrEmpty(t) && File.Exists(t) &&
+                            !_cachedHistory.Exists(x => x.Equals(t, StringComparison.OrdinalIgnoreCase)))
+                            _cachedHistory.Add(t);
                     }
-                    if (lines.Length >= 2) _cachedEditor = lines[1].Trim();
-                    if (lines.Length >= 3 && !string.IsNullOrWhiteSpace(lines[2]))
-                    {
-                        foreach (var p in lines[2].Split('|'))
-                        {
-                            var t = p.Trim();
-                            if (!string.IsNullOrEmpty(t) && File.Exists(t) &&
-                                !_cachedHistory.Exists(x => x.Equals(t, StringComparison.OrdinalIgnoreCase)))
-                                _cachedHistory.Add(t);
-                        }
-                    }
-                }
-                else SaveConfig();
             }
             catch { }
         }
@@ -106,18 +152,14 @@ namespace NotepadReplacer
         {
             try
             {
-                var lines = new string[]
-                {
-                    GetMachineId(),
-                    _cachedEditor ?? "",
-                    string.Join("|", _cachedHistory ?? new List<string>())
-                };
-                File.WriteAllLines(ConfigFile, lines, System.Text.Encoding.UTF8);
+                File.WriteAllLines(ConfigFile,
+                    new[] { GetMachineId(), _cachedEditor, string.Join("|", _cachedHistory) },
+                    System.Text.Encoding.UTF8);
             }
             catch { }
         }
 
-        static string EditorPath() { EnsureConfigLoaded(); return _cachedEditor ?? ""; }
+        static string EditorPath() { EnsureConfigLoaded(); return _cachedEditor; }
         static void SetEditorPath(string path) { EnsureConfigLoaded(); _cachedEditor = path; SaveConfig(); }
         static List<string> LoadEditorHistory() { EnsureConfigLoaded(); return new List<string>(_cachedHistory); }
 
@@ -127,7 +169,8 @@ namespace NotepadReplacer
             EnsureConfigLoaded();
             var cmp = path.Trim();
             if (_cachedHistory.Exists(p => p.Equals(cmp, StringComparison.OrdinalIgnoreCase))) return;
-            _cachedHistory.Add(cmp); SaveConfig();
+            _cachedHistory.Add(cmp);
+            SaveConfig();
         }
 
         static void RemoveEditorHistory(string path)
@@ -155,20 +198,22 @@ namespace NotepadReplacer
             return Environment.MachineName;
         }
 
+        #endregion
+
+        #region IFEO Registry
+
         static void SetDebuggerAllViews(string exe)
         {
-            foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
-            {
+            foreach (var view in RegViews)
                 using (var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view))
                 using (var k = baseKey.CreateSubKey(IFEO_KEY))
                     k.SetValue("Debugger", "\"" + exe + "\"", RegistryValueKind.String);
-            }
         }
 
         static string ReadDebuggerAnyView()
         {
             string dbg = "";
-            foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+            foreach (var view in RegViews)
             {
                 try
                 {
@@ -185,6 +230,11 @@ namespace NotepadReplacer
             return dbg;
         }
 
+        static bool IsReplacementActive()
+        {
+            return ReadDebuggerAnyView().IndexOf(AppName, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
         static void DoEnable()
         {
             string editor = EditorPath();
@@ -195,20 +245,15 @@ namespace NotepadReplacer
 
         static void DoRestore()
         {
-            string currentExeName = AppName;
-            foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
-            {
+            foreach (var view in RegViews)
                 using (var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view))
                 using (var k = baseKey.OpenSubKey(IFEO_KEY, true))
                 {
                     if (k == null) continue;
                     var dbg = k.GetValue("Debugger") as string;
-                    if (dbg == null) continue;
-                    // 匹配当前 exe 名称（支持改名场景）
-                    if (dbg.IndexOf(currentExeName, StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (dbg != null && dbg.IndexOf(AppName, StringComparison.OrdinalIgnoreCase) >= 0)
                         k.DeleteValue("Debugger", false);
                 }
-            }
         }
 
         static void Launcher(string[] args)
@@ -216,32 +261,76 @@ namespace NotepadReplacer
             string editor = EditorPath();
             var sb = new System.Text.StringBuilder();
             for (int i = 1; i < args.Length; i++)
-                sb.Append(" \"" + args[i] + "\"");
-            string fileArgs = sb.ToString().Trim();
+                sb.Append(" \"").Append(args[i]).Append("\"");
             try
             {
-                if (!string.IsNullOrWhiteSpace(editor) && File.Exists(editor))
-                    Process.Start(editor, fileArgs);
-                else
-                    Process.Start("notepad.exe", fileArgs);
+                string target = !string.IsNullOrWhiteSpace(editor) && File.Exists(editor) ? editor : "notepad.exe";
+                Process.Start(target, sb.ToString().Trim());
             }
             catch { }
         }
 
-        static readonly Color CAccent   = Color.FromArgb(0x25, 0x63, 0xEB);
-        static readonly Color CAccentHi = Color.FromArgb(0x1D, 0x4E, 0xD8);
-        static readonly Color CAccentBg = Color.FromArgb(0xEE, 0xF2, 0xFF);
-        static readonly Color CText     = Color.FromArgb(0x11, 0x18, 0x27);
-        static readonly Color CSub      = Color.FromArgb(0x6B, 0x72, 0x80);
-        static readonly Color CGreen    = Color.FromArgb(0x16, 0xA3, 0x4A);
-        static readonly Color CGreenBg  = Color.FromArgb(0xDC, 0xFC, 0xE7);
-        static readonly Color CGrayBg   = Color.FromArgb(0xF3, 0xF4, 0xF6);
-        static readonly Color CAmber    = Color.FromArgb(0xD9, 0x77, 0x06);
-        static readonly Color CAmberBg  = Color.FromArgb(0xFE, 0xF3, 0xC7);
+        #endregion
 
-        const string DEV_NAME  = "godsq";
-        const string DEV_EMAIL = "godsq@qq.com";
-        const string LICENSE   = "MIT License";
+        #region Shared UI Helpers
+
+        public static GraphicsPath RoundedRect(Rectangle r, int rad)
+        {
+            var p = new GraphicsPath();
+            int d = rad * 2;
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.X + r.Width - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Y + r.Height - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        public static void PaintHeader(Graphics g, Rectangle rect, int iconY)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var br = new LinearGradientBrush(rect, CAccent, CHdrEnd, 65f))
+                g.FillRectangle(br, rect);
+            try
+            {
+                using (var ic = Icon.ExtractAssociatedIcon(Application.ExecutablePath))
+                    g.DrawImage(ic.ToBitmap(), new Rectangle(16, iconY, 38, 38));
+            }
+            catch { }
+            using (var bWhite = new SolidBrush(Color.White))
+                g.DrawString("记事本替换工具", FntTitle, bWhite, 64, iconY - 2);
+            using (var bSub = new SolidBrush(CHdrSub))
+                g.DrawString("用你喜欢的编辑器接管系统记事本", FntSub9, bSub, 64, iconY + 26);
+        }
+
+        public static void StyleButton(Button b, Color back, Color fore, Color hover, bool outline)
+        {
+            b.FlatStyle = FlatStyle.Flat;
+            b.FlatAppearance.BorderSize = outline ? 1 : 0;
+            b.FlatAppearance.BorderColor = CAccent;
+            b.FlatAppearance.MouseDownBackColor = hover;
+            b.FlatAppearance.MouseOverBackColor = hover;
+            b.BackColor = back;
+            b.ForeColor = fore;
+            b.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+            b.Cursor = Cursors.Hand;
+            b.UseVisualStyleBackColor = false;
+            b.Padding = new Padding(0);
+        }
+
+        public static string GetItemName(string item)
+        {
+            int idx = item.IndexOf(SEP);
+            return idx >= 0 ? item.Substring(0, idx) : item;
+        }
+
+        public static string GetItemPath(string item)
+        {
+            int idx = item.IndexOf(SEP);
+            return idx >= 0 ? item.Substring(idx + SEP.Length) : "";
+        }
+
+        #endregion
 
         public class MainForm : Form
         {
@@ -249,10 +338,9 @@ namespace NotepadReplacer
             ListBox lstEditors;
             Label lblStatus1, lblStatus2;
             RichTextBox tip;
-            LinkLabel lnkToggle;
+            LinkLabel lnkToggle, lnkAbout;
             Panel pnlHeader, pnlStatus, pnlFooter;
             Button btnBrowse, btnEnable, btnRestore, btnAdmin, btnDelete, btnClear;
-            LinkLabel lnkAbout;
             System.Windows.Forms.Timer tempStatusTimer;
             string currentEditorPath = "";
 
@@ -276,19 +364,21 @@ namespace NotepadReplacer
                 this.MaximizeBox = false;
                 try { this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
-                pnlHeader = new Panel() { Dock = DockStyle.Top, Height = 68, BackColor = CAccent };
-                pnlHeader.Paint += PnlHeader_Paint;
+                // Header
+                pnlHeader = new Panel { Dock = DockStyle.Top, Height = 68, BackColor = CAccent };
+                pnlHeader.Paint += (s, e) => PaintHeader(e.Graphics, pnlHeader.ClientRectangle, (pnlHeader.Height - 38) / 2);
                 this.Controls.Add(pnlHeader);
 
-                var lbl1 = new Label()
+                // Section label
+                this.Controls.Add(new Label
                 {
                     Left = 16, Top = 82, Width = 560,
                     Text = "选择要替换系统记事本的编辑器，单击列表项或点击“浏览”选择：",
                     ForeColor = CText, Font = new Font("Segoe UI", 9.5f)
-                };
-                this.Controls.Add(lbl1);
+                });
 
-                txtEditor = new TextBox()
+                // Editor path input
+                txtEditor = new TextBox
                 {
                     Left = 16, Top = 108, Width = 452, Height = 24,
                     Font = new Font("Segoe UI", 10f), ForeColor = CText,
@@ -296,20 +386,20 @@ namespace NotepadReplacer
                 };
                 this.Controls.Add(txtEditor);
 
-                btnBrowse = new Button() { Left = 476, Top = 107, Width = 96, Height = 26, Text = "浏览..." };
-                StyleButton(btnBrowse, Color.White, CAccent, CAccentBg, true);
+                btnBrowse = CreateBtn(476, 107, 96, 26, "浏览...", Color.White, CAccent, CAccentBg, true);
                 btnBrowse.Click += (s, e) => Browse();
                 this.Controls.Add(btnBrowse);
 
-                var lbl2 = new Label()
+                // List label
+                this.Controls.Add(new Label
                 {
                     Left = 16, Top = 150, Width = 568,
                     Text = "已自动检测到的编辑器（单击选用 ● 为当前已启用）：",
-                    ForeColor = CSub, Font = new Font("Segoe UI", 9f)
-                };
-                this.Controls.Add(lbl2);
+                    ForeColor = CSub, Font = FntSub9
+                });
 
-                lstEditors = new ListBox()
+                // Editor list
+                lstEditors = new ListBox
                 {
                     Left = 16, Top = 176, Width = 568, Height = 194,
                     DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 46,
@@ -320,32 +410,30 @@ namespace NotepadReplacer
                 lstEditors.DrawItem += LstDraw;
                 this.Controls.Add(lstEditors);
 
-                btnDelete = new Button() { Left = 16, Top = 380, Width = 120, Height = 28, Text = "删除选中" };
-                StyleButton(btnDelete, Color.White, Color.FromArgb(0xB9, 0x1C, 0x1C), Color.FromArgb(0xFE, 0xE2, 0xE2), true);
+                // List action buttons
+                btnDelete = CreateBtn(16, 380, 120, 28, "删除选中", Color.White, CRed, CRedBg, true);
                 btnDelete.Click += (s, e) => DeleteSelected();
                 this.Controls.Add(btnDelete);
 
-                btnClear = new Button() { Left = 144, Top = 380, Width = 120, Height = 28, Text = "清空历史" };
-                StyleButton(btnClear, Color.White, CSub, CGrayBg, true);
+                btnClear = CreateBtn(144, 380, 120, 28, "清空历史", Color.White, CSub, CGrayBg, true);
                 btnClear.Click += (s, e) => ClearHistory();
                 this.Controls.Add(btnClear);
 
-                btnEnable = new Button() { Left = 16, Top = 416, Width = 180, Height = 36, Text = "启用替换" };
-                StyleButton(btnEnable, CAccent, Color.White, CAccentHi, false);
+                // Main action buttons
+                btnEnable = CreateBtn(16, 416, 180, 36, "启用替换", CAccent, Color.White, CAccentHi, false);
                 btnEnable.Click += (s, e) => Enable();
                 this.Controls.Add(btnEnable);
 
-                btnRestore = new Button() { Left = 206, Top = 416, Width = 184, Height = 36, Text = "恢复默认记事本" };
-                StyleButton(btnRestore, Color.White, CText, CGrayBg, true);
+                btnRestore = CreateBtn(206, 416, 184, 36, "恢复默认记事本", Color.White, CText, CGrayBg, true);
                 btnRestore.Click += (s, e) => Restore();
                 this.Controls.Add(btnRestore);
 
-                btnAdmin = new Button() { Left = 396, Top = 416, Width = 188, Height = 36, Text = "以管理员身份运行" };
-                StyleButton(btnAdmin, Color.White, CAmber, CAmberBg, true);
+                btnAdmin = CreateBtn(396, 416, 188, 36, "以管理员身份运行", Color.White, CAmber, CAmberBg, true);
                 btnAdmin.Click += (s, e) => RunAsAdmin();
                 this.Controls.Add(btnAdmin);
 
-                lnkToggle = new LinkLabel()
+                // Toggle tip
+                lnkToggle = new LinkLabel
                 {
                     Left = 16, Top = 458, Width = 560, Height = 20,
                     Text = "展开 中转原理 / 使用注意 ▼",
@@ -356,50 +444,34 @@ namespace NotepadReplacer
                 lnkToggle.LinkClicked += (s, e) => ToggleTip();
                 this.Controls.Add(lnkToggle);
 
-                tip = new RichTextBox()
+                // Tip panel
+                tip = new RichTextBox
                 {
                     Left = 16, Top = 482, Width = 568, Height = 192,
                     ReadOnly = true, ScrollBars = RichTextBoxScrollBars.Vertical,
                     BackColor = CGrayBg, BorderStyle = BorderStyle.FixedSingle,
-                    Font = new Font("Segoe UI", 9f), DetectUrls = false,
+                    Font = FntTipBody, DetectUrls = false,
                     Margin = new Padding(0), Padding = new Padding(6),
                     Visible = false
                 };
                 this.Controls.Add(tip);
                 FillTip(tip);
 
-                pnlStatus = new Panel() { Left = 16, Top = 484, Width = 568, Height = 50 };
-                lblStatus1 = new Label()
-                {
-                    Left = 8, Top = 6, Width = 548, Height = 18,
-                    ForeColor = CText, BackColor = Color.Transparent,
-                    Font = new Font("Segoe UI", 9f), UseMnemonic = false,
-                    AutoEllipsis = true
-                };
-                lblStatus2 = new Label()
-                {
-                    Left = 8, Top = 26, Width = 548, Height = 18,
-                    ForeColor = CSub, BackColor = Color.Transparent,
-                    Font = new Font("Segoe UI", 9f), UseMnemonic = false
-                };
+                // Status panel
+                pnlStatus = new Panel { Left = 16, Top = 484, Width = 568, Height = 50 };
+                lblStatus1 = MakeLabel(8, 6, 548, 18, CText);
+                lblStatus2 = MakeLabel(8, 26, 548, 18, CSub);
                 pnlStatus.Controls.Add(lblStatus1);
                 pnlStatus.Controls.Add(lblStatus2);
                 this.Controls.Add(pnlStatus);
 
-                pnlFooter = new Panel() { Left = 0, Top = 538, Width = 600, Height = 32, BackColor = CAccentBg };
-                var lblDev = new Label()
-                {
-                    Left = 16, Top = 7, Width = 250, Height = 18,
-                    Text = "© 2026 " + DEV_NAME + " · 基于 " + LICENSE + " 开源",
-                    ForeColor = CSub, Font = new Font("Segoe UI", 9f), BackColor = Color.Transparent
-                };
-                var lblEmail = new Label()
-                {
-                    Left = 270, Top = 7, Width = 150, Height = 18,
-                    Text = DEV_EMAIL, Font = new Font("Segoe UI", 9f),
-                    ForeColor = CSub, BackColor = Color.Transparent, TextAlign = ContentAlignment.MiddleLeft
-                };
-                lnkAbout = new LinkLabel()
+                // Footer
+                pnlFooter = new Panel { Left = 0, Top = 538, Width = 600, Height = 32, BackColor = CAccentBg };
+                pnlFooter.Controls.Add(MakeLabel(16, 7, 250, 18, CSub,
+                    "© 2026 " + DEV_NAME + " · 基于 " + LICENSE + " 开源"));
+                pnlFooter.Controls.Add(MakeLabel(270, 7, 150, 18, CSub, DEV_EMAIL,
+                    ContentAlignment.MiddleLeft));
+                lnkAbout = new LinkLabel
                 {
                     Left = 424, Top = 7, Width = 160, Height = 18,
                     Text = "查看开源声明 ▸", Font = new Font("Segoe UI", 9f, FontStyle.Underline),
@@ -407,43 +479,39 @@ namespace NotepadReplacer
                     TextAlign = ContentAlignment.MiddleRight
                 };
                 lnkAbout.LinkClicked += (s, e) => ShowAbout();
-                pnlFooter.Controls.Add(lblDev);
-                pnlFooter.Controls.Add(lblEmail);
                 pnlFooter.Controls.Add(lnkAbout);
                 this.Controls.Add(pnlFooter);
             }
 
-            static GraphicsPath RoundedRect(Rectangle r, int rad)
+            Button CreateBtn(int x, int y, int w, int h, string text, Color back, Color fore, Color hover, bool outline)
             {
-                var p = new GraphicsPath();
-                int d = rad * 2;
-                p.AddArc(r.X, r.Y, d, d, 180, 90);
-                p.AddArc(r.X + r.Width - d, r.Y, d, d, 270, 90);
-                p.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0, 90);
-                p.AddArc(r.X, r.Y + r.Height - d, d, d, 90, 90);
-                p.CloseFigure();
-                return p;
+                var b = new Button { Left = x, Top = y, Width = w, Height = h, Text = text };
+                StyleButton(b, back, fore, hover, outline);
+                return b;
             }
 
-            void PnlHeader_Paint(object s, PaintEventArgs e)
+            static Label MakeLabel(int x, int y, int w, int h, Color fg)
             {
-                var g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                var rect = pnlHeader.ClientRectangle;
-                using (var br = new LinearGradientBrush(rect, CAccent, Color.FromArgb(0x4F, 0x46, 0xE5), 65f))
-                    g.FillRectangle(br, rect);
-                try
+                return new Label
                 {
-                    using (var ic = Icon.ExtractAssociatedIcon(Application.ExecutablePath))
-                        g.DrawImage(ic.ToBitmap(), new Rectangle(16, (rect.Height - 38) / 2, 38, 38));
-                }
-                catch { }
-                using (var f = new Font("Segoe UI", 14, FontStyle.Bold))
-                using (var b = new SolidBrush(Color.White))
-                    g.DrawString("记事本替换工具", f, b, 64, 13);
-                using (var f2 = new Font("Segoe UI", 9))
-                using (var b2 = new SolidBrush(Color.FromArgb(0xE0, 0xE7, 0xFF)))
-                    g.DrawString("用你喜欢的编辑器接管系统记事本", f2, b2, 64, 41);
+                    Left = x, Top = y, Width = w, Height = h,
+                    ForeColor = fg, BackColor = Color.Transparent,
+                    Font = FntSub9, UseMnemonic = false, AutoEllipsis = true
+                };
+            }
+
+            static Label MakeLabel(int x, int y, int w, int h, Color fg, string text)
+            {
+                var lbl = MakeLabel(x, y, w, h, fg);
+                lbl.Text = text;
+                return lbl;
+            }
+
+            static Label MakeLabel(int x, int y, int w, int h, Color fg, string text, ContentAlignment align)
+            {
+                var lbl = MakeLabel(x, y, w, h, fg, text);
+                lbl.TextAlign = align;
+                return lbl;
             }
 
             void LstDraw(object s, DrawItemEventArgs e)
@@ -455,40 +523,37 @@ namespace NotepadReplacer
                 var r = e.Bounds;
                 bool sel = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
 
-                Color bg = sel ? CAccentBg : (e.Index % 2 == 0 ? Color.White : Color.FromArgb(0xF8, 0xFA, 0xFC));
-                using (var br = new SolidBrush(bg)) g.FillRectangle(br, r);
+                string item = lstEditors.Items[e.Index].ToString();
+                string name = GetItemName(item);
+                string path = GetItemPath(item);
+                bool isCurrent = !string.IsNullOrEmpty(path) &&
+                    path.Equals(currentEditorPath, StringComparison.OrdinalIgnoreCase);
+
+                // Background
+                using (var br = new SolidBrush(sel ? CAccentBg : (e.Index % 2 == 0 ? Color.White : CAltRow)))
+                    g.FillRectangle(br, r);
                 if (sel)
                     using (var pen = new Pen(CAccent, 2))
                         g.DrawRectangle(pen, r.X, r.Y, r.Width - 1, r.Height - 1);
 
-                string item = lstEditors.Items[e.Index].ToString();
-                int idx = item.IndexOf("  ->  ");
-                string name = idx >= 0 ? item.Substring(0, idx) : item;
-                string path = idx >= 0 ? item.Substring(idx + 6) : "";
-                bool isCurrent = !string.IsNullOrEmpty(path) &&
-                    path.Equals(currentEditorPath, StringComparison.OrdinalIgnoreCase);
-
+                // Icon square + initial
                 var sq = new Rectangle(r.X + 10, r.Y + (r.Height - 32) / 2, 32, 32);
                 using (var br2 = new SolidBrush(isCurrent ? CGreen : CAccent))
                     g.FillPath(br2, RoundedRect(sq, 8));
-                string ini = name.Length > 0 ? char.ToUpper(name[0]).ToString() : "?";
-                using (var f = new Font("Segoe UI", 13, FontStyle.Bold))
-                using (var b = new SolidBrush(Color.White))
-                using (var sf = new StringFormat() { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                    g.DrawString(ini, f, b, new RectangleF(sq.X, sq.Y, sq.Width, sq.Height), sf);
-
-                using (var fb = new Font("Segoe UI", 10.5f, FontStyle.Bold))
-                using (var bb = new SolidBrush(isCurrent ? CGreen : CText))
-                    g.DrawString(name, fb, bb, sq.Right + 10, r.Y + 6);
-
-                using (var fp = new Font("Segoe UI", 8.5f))
-                using (var bp = new SolidBrush(CSub))
+                using (var bWhite = new SolidBrush(Color.White))
                 {
-                    var pathRect = new RectangleF(sq.Right + 10, r.Y + 25, r.Width - sq.Right - 40, 18);
-                    var psf = new StringFormat() { Trimming = StringTrimming.EllipsisCharacter, LineAlignment = StringAlignment.Near };
-                    g.DrawString(path, fp, bp, pathRect, psf);
+                    string ini = name.Length > 0 ? char.ToUpper(name[0]).ToString() : "?";
+                    g.DrawString(ini, FntInitial, bWhite, new RectangleF(sq.X, sq.Y, sq.Width, sq.Height), SfCenter);
                 }
 
+                // Name + path
+                using (var bName = new SolidBrush(isCurrent ? CGreen : CText))
+                    g.DrawString(name, FntItemName, bName, sq.Right + 10, r.Y + 6);
+                var pathRect = new RectangleF(sq.Right + 10, r.Y + 25, r.Width - sq.Right - 40, 18);
+                using (var bp = new SolidBrush(CSub))
+                    g.DrawString(path, FntItemPath, bp, pathRect, SfTrim);
+
+                // Current marker
                 if (isCurrent)
                 {
                     var dot = new Rectangle(r.Right - 22, r.Y + (r.Height - 12) / 2, 12, 12);
@@ -497,28 +562,9 @@ namespace NotepadReplacer
                 }
             }
 
-            static void StyleButton(Button b, Color back, Color fore, Color hover, bool outline)
-            {
-                b.FlatStyle = FlatStyle.Flat;
-                b.FlatAppearance.BorderSize = outline ? 1 : 0;
-                b.FlatAppearance.BorderColor = CAccent;
-                b.FlatAppearance.MouseDownBackColor = hover;
-                b.FlatAppearance.MouseOverBackColor = hover;
-                b.BackColor = back;
-                b.ForeColor = fore;
-                b.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
-                b.Cursor = Cursors.Hand;
-                b.UseVisualStyleBackColor = false;
-                b.Padding = new Padding(0);
-            }
-
             void Browse()
             {
-                var d = new OpenFileDialog()
-                {
-                    Filter = "可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*",
-                    Title = "选择编辑器"
-                };
+                var d = new OpenFileDialog { Filter = "可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*", Title = "选择编辑器" };
                 if (d.ShowDialog() == DialogResult.OK)
                 {
                     txtEditor.Text = d.FileName;
@@ -531,18 +577,15 @@ namespace NotepadReplacer
             void PickFromList()
             {
                 if (lstEditors.SelectedItem == null) return;
-                string s = lstEditors.SelectedItem.ToString();
-                int idx = s.IndexOf("  ->  ");
-                if (idx >= 0) { txtEditor.Text = s.Substring(idx + 6).Trim(); lstEditors.Invalidate(); }
+                string path = GetItemPath(lstEditors.SelectedItem.ToString());
+                if (!string.IsNullOrEmpty(path)) { txtEditor.Text = path.Trim(); lstEditors.Invalidate(); }
             }
 
             void DeleteSelected()
             {
                 if (lstEditors.SelectedIndex < 0)
                 { MessageBox.Show("请先在列表中选中要删除的编辑器。", "提示"); return; }
-                string s = lstEditors.SelectedItem.ToString();
-                int idx = s.IndexOf("  ->  ");
-                string path = idx >= 0 ? s.Substring(idx + 6).Trim() : "";
+                string path = GetItemPath(lstEditors.SelectedItem.ToString());
                 if (!string.IsNullOrEmpty(path)) RemoveEditorHistory(path);
                 lstEditors.Items.RemoveAt(lstEditors.SelectedIndex);
                 lstEditors.Invalidate();
@@ -567,66 +610,31 @@ namespace NotepadReplacer
                 SetEditorPath(path);
                 AddEditorHistory(path);
                 AddEditorToList(path);
-
-                if (!IsAdmin())
-                {
-                    try
-                    {
-                        var p = Process.Start(new ProcessStartInfo(Application.ExecutablePath, "/enable")
-                        { Verb = "runas", UseShellExecute = true });
-                        p.WaitForExit();
-                        if (p.ExitCode == 0)
-                        {
-                            ShowTempStatus("\u2713 已启用替换：记事本已重定向到你设置的编辑器。");
-                            return;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show("提权未成功，替换未启用。\n\n可能原因：\n• UAC 提权被取消；\n• 被安全软件 / 杀毒软件 / Windows Defender 拦截了提权或本程序。\n\n请关闭拦截或将本程序加入白名单后重试。\n\n技术信息：" + ex.Message,
-                            "提权失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                }
-                else
-                {
-                    try
-                    {
-                        DoEnable();
-                        ShowTempStatus("\u2713 已启用替换：记事本已重定向到你设置的编辑器。");
-                        return;
-                    }
-                    catch (UnauthorizedAccessException)
-                    {
-                        MessageBox.Show("写入注册表被拒绝，替换未能生效。\n\n常见原因：\n• 未以管理员身份运行（请右键本程序→“以管理员身份运行”）；\n• 被安全软件 / 杀毒软件 / Windows Defender 拦截了对 IFEO 注册表的修改；\n• UAC 提权被取消。\n\n可先关闭拦截软件或将本程序加入白名单，再以管理员身份重试。",
-                            "权限不足 / 被拦截", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show("启用失败：" + ex.Message + "\n\n若被安全软件拦截，请将本程序加入白名单后以管理员身份重试。",
-                            "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    }
-                }
-                RefreshStatus();
+                RunWithElevation("/enable", DoEnable, "替换", "\u2713 已启用替换：记事本已重定向到你设置的编辑器。");
             }
 
             void Restore()
+            {
+                RunWithElevation("/restore", DoRestore, "恢复", "\u2713 已恢复默认记事本。");
+            }
+
+            /// <summary>
+            /// Shared logic for Enable/Restore: run elevated if needed, show temp status on success.
+            /// </summary>
+            void RunWithElevation(string arg, Action action, string noun, string successMsg)
             {
                 if (!IsAdmin())
                 {
                     try
                     {
-                        var p = Process.Start(new ProcessStartInfo(Application.ExecutablePath, "/restore")
+                        var p = Process.Start(new ProcessStartInfo(Application.ExecutablePath, arg)
                         { Verb = "runas", UseShellExecute = true });
                         p.WaitForExit();
-                        if (p.ExitCode == 0)
-                        {
-                            ShowTempStatus("\u2713 已恢复默认记事本。");
-                            return;
-                        }
+                        if (p.ExitCode == 0) { ShowTempStatus(successMsg); return; }
                     }
                     catch (Exception ex)
                     {
-                        MessageBox.Show("提权未成功，未执行恢复。\n\n可能原因：\n• UAC 提权被取消；\n• 被安全软件 / 杀毒软件 / Windows Defender 拦截了提权或本程序。\n\n请关闭拦截或将本程序加入白名单后重试。\n\n技术信息：" + ex.Message,
+                        MessageBox.Show(string.Format(ELEV_ERR_FMT, noun + "未执行") + ex.Message,
                             "提权失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     }
                 }
@@ -634,18 +642,18 @@ namespace NotepadReplacer
                 {
                     try
                     {
-                        DoRestore();
-                        ShowTempStatus("\u2713 已恢复默认记事本。");
+                        action();
+                        ShowTempStatus(successMsg);
                         return;
                     }
                     catch (UnauthorizedAccessException)
                     {
-                        MessageBox.Show("写入注册表被拒绝，恢复未能完成。\n\n常见原因：\n• 未以管理员身份运行；\n• 被安全软件 / 杀毒软件 / Windows Defender 拦截了对 IFEO 注册表的修改。\n\n请以管理员身份运行本程序或将本程序加入白名单后重试。",
+                        MessageBox.Show(string.Format(PERM_ERR_FMT, noun + "未能完成"),
                             "权限不足 / 被拦截", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     }
                     catch (Exception ex)
                     {
-                        MessageBox.Show("恢复失败：" + ex.Message + "\n\n若被安全软件拦截，请将本程序加入白名单后以管理员身份重试。",
+                        MessageBox.Show(noun + "失败：" + ex.Message + "\n\n若被安全软件拦截，请将本程序加入白名单后以管理员身份重试。",
                             "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     }
                 }
@@ -668,30 +676,20 @@ namespace NotepadReplacer
                 bool expand = !tip.Visible;
                 tip.Visible = expand;
                 lnkToggle.Text = expand ? "收起 中转原理 / 使用注意 ▲" : "展开 中转原理 / 使用注意 ▼";
-                if (expand)
-                {
-                    this.ClientSize = new Size(600, 760);
-                    pnlStatus.Top = 678;
-                    pnlFooter.Top = 724;
-                }
-                else
-                {
-                    this.ClientSize = new Size(600, 570);
-                    pnlStatus.Top = 484;
-                    pnlFooter.Top = 538;
-                }
+                this.ClientSize = new Size(600, expand ? 760 : 570);
+                pnlStatus.Top = expand ? 678 : 484;
+                pnlFooter.Top = expand ? 724 : 538;
             }
 
             void ShowTempStatus(string message)
             {
                 if (tempStatusTimer == null)
                 {
-                    tempStatusTimer = new System.Windows.Forms.Timer();
-                    tempStatusTimer.Interval = 2000;
+                    tempStatusTimer = new System.Windows.Forms.Timer { Interval = 2000 };
                     tempStatusTimer.Tick += (s, e) => { tempStatusTimer.Stop(); RefreshStatus(); };
                 }
                 pnlStatus.BackColor = CGreenBg;
-                lblStatus1.ForeColor = Color.FromArgb(0x14, 0x5A, 0x32);
+                lblStatus1.ForeColor = CDkGreen;
                 lblStatus1.Text = message;
                 lblStatus2.Text = "";
                 tempStatusTimer.Start();
@@ -701,45 +699,44 @@ namespace NotepadReplacer
             {
                 bool elevated = IsAdmin();
                 btnAdmin.Visible = !elevated;
-                bool active = ReadDebuggerAnyView().IndexOf(AppName, StringComparison.OrdinalIgnoreCase) >= 0;
+                bool active = IsReplacementActive();
                 string editor = EditorPath();
                 string editorName = string.IsNullOrEmpty(editor) ? "(未记录)" : Path.GetFileName(editor);
                 currentEditorPath = active ? editor : "";
                 this.Text = AppName + " · " + (active ? "已启用替换" : "未启用替换") + " · " + editorName;
                 lstEditors.Invalidate();
 
+                Color bg, fg1, fg2;
+                string t1, t2;
                 if (active && elevated)
                 {
-                    pnlStatus.BackColor = CGreenBg;
-                    lblStatus1.ForeColor = Color.FromArgb(0x14, 0x5A, 0x32);
-                    lblStatus1.Text = "已启用替换　当前编辑器：" + editorName + "　·　" + editor;
-                    lblStatus2.ForeColor = CAccent;
-                    lblStatus2.Text = "已以管理员身份运行，可正常启用 / 恢复。";
+                    bg = CGreenBg; fg1 = CDkGreen; fg2 = CAccent;
+                    t1 = "已启用替换　当前编辑器：" + editorName + "　·　" + editor;
+                    t2 = "已以管理员身份运行，可正常启用 / 恢复。";
                 }
-                else if (active && !elevated)
+                else if (active)
                 {
-                    pnlStatus.BackColor = CAmberBg;
-                    lblStatus1.ForeColor = Color.FromArgb(0x14, 0x5A, 0x32);
-                    lblStatus1.Text = "已启用替换　当前编辑器：" + editorName + "　·　" + editor;
-                    lblStatus2.ForeColor = CAmber;
-                    lblStatus2.Text = "当前非管理员，恢复 / 修改时会请求 UAC 提权（或点「以管理员身份运行」）。";
+                    bg = CAmberBg; fg1 = CDkGreen; fg2 = CAmber;
+                    t1 = "已启用替换　当前编辑器：" + editorName + "　·　" + editor;
+                    t2 = "当前非管理员，恢复 / 修改时会请求 UAC 提权（或点「以管理员身份运行」）。";
                 }
-                else if (!active && elevated)
+                else if (elevated)
                 {
-                    pnlStatus.BackColor = CGrayBg;
-                    lblStatus1.ForeColor = Color.FromArgb(0x37, 0x41, 0x51);
-                    lblStatus1.Text = "未启用　目前使用系统默认记事本";
-                    lblStatus2.ForeColor = CAccent;
-                    lblStatus2.Text = "已以管理员身份运行，点击「启用替换」即可生效。";
+                    bg = CGrayBg; fg1 = CGrayText; fg2 = CAccent;
+                    t1 = "未启用　目前使用系统默认记事本";
+                    t2 = "已以管理员身份运行，点击「启用替换」即可生效。";
                 }
                 else
                 {
-                    pnlStatus.BackColor = CAmberBg;
-                    lblStatus1.ForeColor = Color.FromArgb(0x92, 0x40, 0x06);
-                    lblStatus1.Text = "未启用　目前使用系统默认记事本";
-                    lblStatus2.ForeColor = CAmber;
-                    lblStatus2.Text = "当前非管理员：点击「启用替换」会请求 UAC 提权（或点「以管理员身份运行」）。";
+                    bg = CAmberBg; fg1 = CDkAmber; fg2 = CAmber;
+                    t1 = "未启用　目前使用系统默认记事本";
+                    t2 = "当前非管理员：点击「启用替换」会请求 UAC 提权（或点「以管理员身份运行」）。";
                 }
+                pnlStatus.BackColor = bg;
+                lblStatus1.ForeColor = fg1;
+                lblStatus1.Text = t1;
+                lblStatus2.ForeColor = fg2;
+                lblStatus2.Text = t2;
             }
 
             void EnsureCurrentInList() { AddEditorToList(EditorPath()); }
@@ -753,7 +750,7 @@ namespace NotepadReplacer
             void AddEditorToList(string editor)
             {
                 if (string.IsNullOrWhiteSpace(editor) || !File.Exists(editor)) return;
-                string item = Path.GetFileNameWithoutExtension(editor) + "  ->  " + editor;
+                string item = Path.GetFileNameWithoutExtension(editor) + SEP + editor;
                 foreach (var o in lstEditors.Items)
                     if (string.Equals(o.ToString(), item, StringComparison.OrdinalIgnoreCase)) return;
                 lstEditors.Items.Add(item);
@@ -761,107 +758,30 @@ namespace NotepadReplacer
 
             void ShowAbout() { using (var dlg = new AboutForm()) dlg.ShowDialog(this); }
 
+            static void AppendTip(RichTextBox rt, Font font, Color color, string text)
+            {
+                rt.SelectionFont = font;
+                rt.SelectionColor = color;
+                rt.AppendText(text);
+            }
+
             void FillTip(RichTextBox rt)
             {
                 rt.Clear();
-                var title = new Font("Segoe UI", 10f, FontStyle.Bold);
-                var body = new Font("Segoe UI", 9f);
-                rt.SelectionFont = title; rt.SelectionColor = CText;
-                rt.AppendText("【中转原理】\n");
-                rt.SelectionFont = body; rt.SelectionColor = Color.FromArgb(0x2B, 0x34, 0x44);
-                rt.AppendText("本工具利用 Windows 映像劫持(IFEO)：把 notepad.exe 的“调试器”指向本程序。\n");
-                rt.AppendText("当任意程序或双击打开 .txt 时，系统实际启动的是本工具，再由本工具调用你设置的编辑器打开该文件。\n");
-                rt.AppendText("不修改任何系统文件，仅写入注册表，可随时一键恢复。\n\n");
-                rt.SelectionFont = title; rt.SelectionColor = CText;
-                rt.AppendText("【使用注意】\n");
-                rt.SelectionFont = body; rt.SelectionColor = Color.FromArgb(0x2B, 0x34, 0x44);
-                rt.AppendText("① 写入 IFEO 需管理员权限：点“启用替换”会请求 UAC 提权，或右键本程序“以管理员身份运行”。\n\n");
-                rt.AppendText("② 本程序必须保留在当前路径；删除前请先点“恢复默认记事本”解除，否则系统将无法打开记事本。\n\n");
-                rt.AppendText("③ 仅劫持 notepad.exe，不影响其他软件；异常时点“恢复默认记事本”即可立即还原。\n\n");
-                rt.AppendText("④ 注册表：HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\notepad.exe");
-                rt.SelectionStart = 0; rt.SelectionLength = 0;
+                AppendTip(rt, FntTipTitle, CText, "【中转原理】\n");
+                AppendTip(rt, FntTipBody, CTipBody,
+                    "本工具利用 Windows 映像劫持(IFEO)：把 notepad.exe 的“调试器”指向本程序。\n" +
+                    "当任意程序或双击打开 .txt 时，系统实际启动的是本工具，再由本工具调用你设置的编辑器打开该文件。\n" +
+                    "不修改任何系统文件，仅写入注册表，可随时一键恢复。\n\n");
+                AppendTip(rt, FntTipTitle, CText, "【使用注意】\n");
+                AppendTip(rt, FntTipBody, CTipBody,
+                    "① 写入 IFEO 需管理员权限：点“启用替换”会请求 UAC 提权，或右键本程序“以管理员身份运行”。\n\n" +
+                    "② 本程序必须保留在当前路径；删除前请先点“恢复默认记事本”解除，否则系统将无法打开记事本。\n\n" +
+                    "③ 仅劫持 notepad.exe，不影响其他软件；异常时点“恢复默认记事本”即可立即还原。\n\n" +
+                    "④ 注册表：HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\notepad.exe");
+                rt.SelectionStart = 0;
+                rt.SelectionLength = 0;
             }
-
-            public class AboutForm : Form
-            {
-                public AboutForm()
-                {
-                    this.Text = "About " + AppName;
-                    this.ClientSize = new Size(560, 460);
-                    this.FormBorderStyle = FormBorderStyle.FixedSingle;
-                    this.StartPosition = FormStartPosition.CenterParent;
-                    this.BackColor = Color.White;
-                    this.Font = new Font("Segoe UI", 9.5f);
-                    this.DoubleBuffered = true;
-                    this.MaximizeBox = false;
-                    this.MinimizeBox = false;
-                    try { this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
-
-                    var pnl = new Panel() { Dock = DockStyle.Top, Height = 76, BackColor = CAccent };
-                    pnl.Paint += (s, e) =>
-                    {
-                        var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
-                        var rect = pnl.ClientRectangle;
-                        using (var br = new LinearGradientBrush(rect, CAccent, Color.FromArgb(0x4F, 0x46, 0xE5), 65f))
-                            g.FillRectangle(br, rect);
-                        try { using (var ic = Icon.ExtractAssociatedIcon(Application.ExecutablePath)) g.DrawImage(ic.ToBitmap(), new Rectangle(16, 19, 38, 38)); } catch { }
-                        using (var f = new Font("Segoe UI", 14, FontStyle.Bold))
-                        using (var b = new SolidBrush(Color.White))
-                            g.DrawString("记事本替换工具", f, b, 64, 14);
-                        using (var f2 = new Font("Segoe UI", 9))
-                        using (var b2 = new SolidBrush(Color.FromArgb(0xE0, 0xE7, 0xFF)))
-                            g.DrawString("用你喜欢的编辑器接管系统记事本", f2, b2, 64, 42);
-                    };
-                    this.Controls.Add(pnl);
-
-                    var info = new Label()
-                    {
-                        Left = 18, Top = 90, Width = 524, Height = 56,
-                        Text = "Developer: " + DEV_NAME + " | License: " + LICENSE + "\nEmail: " + DEV_EMAIL,
-                        ForeColor = CText, Font = new Font("Segoe UI", 10f)
-                    };
-                    this.Controls.Add(info);
-
-                    var lic = new TextBox()
-                    {
-                        Left = 18, Top = 152, Width = 524, Height = 232,
-                        Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
-                        Font = new Font("Consolas", 9f), ForeColor = CText, BackColor = Color.FromArgb(0xF8, 0xFA, 0xFC),
-                        BorderStyle = BorderStyle.FixedSingle
-                    };
-                    lic.Text = MIT_TEXT;
-                    this.Controls.Add(lic);
-
-                    var btn = new Button() { Left = 18, Top = 396, Width = 140, Height = 32, Text = "Copy License" };
-                    StyleButton(btn, CAccent, Color.White, CAccentHi, false);
-                    btn.Click += (s, e) => { try { Clipboard.SetText(MIT_TEXT); MessageBox.Show("Copied to clipboard.", "Notice"); } catch { } };
-                    this.Controls.Add(btn);
-
-                    var btnClose = new Button() { Left = 402, Top = 396, Width = 140, Height = 32, Text = "Close" };
-                    StyleButton(btnClose, Color.White, CText, CGrayBg, true);
-                    btnClose.Click += (s, e) => this.Close();
-                    this.Controls.Add(btnClose);
-                }
-            }
-
-            const string MIT_TEXT =
-                "MIT License\n\n" +
-                "Copyright (c) 2026 godsq\n\n" +
-                "Permission is hereby granted, free of charge, to any person obtaining a copy\n" +
-                "of this software and associated documentation files (the \"Software\"), to deal\n" +
-                "in the Software without restriction, including without limitation the rights\n" +
-                "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n" +
-                "copies of the Software, and to permit persons to whom the Software is\n" +
-                "furnished to do so, subject to the following conditions:\n\n" +
-                "The above copyright notice and this permission notice shall be included in all\n" +
-                "copies or substantial portions of the Software.\n\n" +
-                "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n" +
-                "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n" +
-                "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n" +
-                "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n" +
-                "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n" +
-                "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n" +
-                "SOFTWARE.";
 
             void DetectEditors()
             {
@@ -913,9 +833,76 @@ namespace NotepadReplacer
                 foreach (var p in paths)
                     if (File.Exists(p))
                     {
-                        lstEditors.Items.Add(Path.GetFileNameWithoutExtension(p) + "  ->  " + p);
+                        lstEditors.Items.Add(Path.GetFileNameWithoutExtension(p) + SEP + p);
                         return;
                     }
+            }
+
+            const string MIT_TEXT =
+                "MIT License\n\n" +
+                "Copyright (c) 2026 godsq\n\n" +
+                "Permission is hereby granted, free of charge, to any person obtaining a copy\n" +
+                "of this software and associated documentation files (the \"Software\"), to deal\n" +
+                "in the Software without restriction, including without limitation the rights\n" +
+                "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n" +
+                "copies of the Software, and to permit persons to whom the Software is\n" +
+                "furnished to do so, subject to the following conditions:\n\n" +
+                "The above copyright notice and this permission notice shall be included in all\n" +
+                "copies or substantial portions of the Software.\n\n" +
+                "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n" +
+                "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n" +
+                "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n" +
+                "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n" +
+                "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n" +
+                "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n" +
+                "SOFTWARE.";
+
+            public class AboutForm : Form
+            {
+                public AboutForm()
+                {
+                    this.Text = "About " + AppName;
+                    this.ClientSize = new Size(560, 460);
+                    this.FormBorderStyle = FormBorderStyle.FixedSingle;
+                    this.StartPosition = FormStartPosition.CenterParent;
+                    this.BackColor = Color.White;
+                    this.Font = new Font("Segoe UI", 9.5f);
+                    this.DoubleBuffered = true;
+                    this.MaximizeBox = false;
+                    this.MinimizeBox = false;
+                    try { this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+                    var pnl = new Panel { Dock = DockStyle.Top, Height = 76, BackColor = CAccent };
+                    pnl.Paint += (s, e) => PaintHeader(e.Graphics, pnl.ClientRectangle, (pnl.Height - 38) / 2);
+                    this.Controls.Add(pnl);
+
+                    this.Controls.Add(new Label
+                    {
+                        Left = 18, Top = 90, Width = 524, Height = 56,
+                        Text = "Developer: " + DEV_NAME + " | License: " + LICENSE + "\nEmail: " + DEV_EMAIL,
+                        ForeColor = CText, Font = new Font("Segoe UI", 10f)
+                    });
+
+                    var lic = new TextBox
+                    {
+                        Left = 18, Top = 152, Width = 524, Height = 232,
+                        Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
+                        Font = new Font("Consolas", 9f), ForeColor = CText, BackColor = CAltRow,
+                        BorderStyle = BorderStyle.FixedSingle
+                    };
+                    lic.Text = MIT_TEXT;
+                    this.Controls.Add(lic);
+
+                    var btnCopy = new Button { Left = 18, Top = 396, Width = 140, Height = 32, Text = "Copy License" };
+                    StyleButton(btnCopy, CAccent, Color.White, CAccentHi, false);
+                    btnCopy.Click += (s, e) => { try { Clipboard.SetText(MIT_TEXT); MessageBox.Show("Copied to clipboard.", "Notice"); } catch { } };
+                    this.Controls.Add(btnCopy);
+
+                    var btnClose = new Button { Left = 402, Top = 396, Width = 140, Height = 32, Text = "Close" };
+                    StyleButton(btnClose, Color.White, CText, CGrayBg, true);
+                    btnClose.Click += (s, e) => this.Close();
+                    this.Controls.Add(btnClose);
+                }
             }
         }
     }
