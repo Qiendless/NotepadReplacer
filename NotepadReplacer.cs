@@ -23,14 +23,14 @@ namespace NotepadReplacer
         {
             if (args.Length > 0 && args[0] == "/enable")
             {
-                try { DoEnable(); MessageBox.Show("已启用替换：记事本已重定向到你设置的编辑器。", AppName); }
-                catch (Exception ex) { MessageBox.Show("启用失败：" + ex.Message, "错误"); }
+                try { DoEnable(); Environment.ExitCode = 0; }
+                catch (Exception ex) { MessageBox.Show("启用失败：" + ex.Message, "错误"); Environment.ExitCode = 1; }
                 return;
             }
             if (args.Length > 0 && args[0] == "/restore")
             {
-                try { DoRestore(); MessageBox.Show("已恢复默认记事本。", AppName); }
-                catch (Exception ex) { MessageBox.Show("恢复失败：" + ex.Message, "错误"); }
+                try { DoRestore(); Environment.ExitCode = 0; }
+                catch (Exception ex) { MessageBox.Show("恢复失败：" + ex.Message, "错误"); Environment.ExitCode = 1; }
                 return;
             }
             if (args.Length > 0) { Launcher(args); return; }
@@ -253,6 +253,7 @@ namespace NotepadReplacer
             Panel pnlHeader, pnlStatus, pnlFooter;
             Button btnBrowse, btnEnable, btnRestore, btnAdmin, btnDelete, btnClear;
             LinkLabel lnkAbout;
+            System.Windows.Forms.Timer tempStatusTimer;
             string currentEditorPath = "";
 
             public MainForm()
@@ -439,10 +440,10 @@ namespace NotepadReplacer
                 catch { }
                 using (var f = new Font("Segoe UI", 14, FontStyle.Bold))
                 using (var b = new SolidBrush(Color.White))
-                    g.DrawString("NotepadReplacer", f, b, 64, 13);
+                    g.DrawString("记事本替换工具", f, b, 64, 13);
                 using (var f2 = new Font("Segoe UI", 9))
                 using (var b2 = new SolidBrush(Color.FromArgb(0xE0, 0xE7, 0xFF)))
-                    g.DrawString(AppName + " · 用你喜欢的编辑器接管系统记事本", f2, b2, 64, 41);
+                    g.DrawString("用你喜欢的编辑器接管系统记事本", f2, b2, 64, 41);
             }
 
             void LstDraw(object s, DrawItemEventArgs e)
@@ -574,6 +575,11 @@ namespace NotepadReplacer
                         var p = Process.Start(new ProcessStartInfo(Application.ExecutablePath, "/enable")
                         { Verb = "runas", UseShellExecute = true });
                         p.WaitForExit();
+                        if (p.ExitCode == 0)
+                        {
+                            ShowTempStatus("\u2713 已启用替换：记事本已重定向到你设置的编辑器。");
+                            return;
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -583,7 +589,12 @@ namespace NotepadReplacer
                 }
                 else
                 {
-                    try { DoEnable(); }
+                    try
+                    {
+                        DoEnable();
+                        ShowTempStatus("\u2713 已启用替换：记事本已重定向到你设置的编辑器。");
+                        return;
+                    }
                     catch (UnauthorizedAccessException)
                     {
                         MessageBox.Show("写入注册表被拒绝，替换未能生效。\n\n常见原因：\n• 未以管理员身份运行（请右键本程序→“以管理员身份运行”）；\n• 被安全软件 / 杀毒软件 / Windows Defender 拦截了对 IFEO 注册表的修改；\n• UAC 提权被取消。\n\n可先关闭拦截软件或将本程序加入白名单，再以管理员身份重试。",
@@ -607,6 +618,11 @@ namespace NotepadReplacer
                         var p = Process.Start(new ProcessStartInfo(Application.ExecutablePath, "/restore")
                         { Verb = "runas", UseShellExecute = true });
                         p.WaitForExit();
+                        if (p.ExitCode == 0)
+                        {
+                            ShowTempStatus("\u2713 已恢复默认记事本。");
+                            return;
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -616,7 +632,12 @@ namespace NotepadReplacer
                 }
                 else
                 {
-                    try { DoRestore(); }
+                    try
+                    {
+                        DoRestore();
+                        ShowTempStatus("\u2713 已恢复默认记事本。");
+                        return;
+                    }
                     catch (UnauthorizedAccessException)
                     {
                         MessageBox.Show("写入注册表被拒绝，恢复未能完成。\n\n常见原因：\n• 未以管理员身份运行；\n• 被安全软件 / 杀毒软件 / Windows Defender 拦截了对 IFEO 注册表的修改。\n\n请以管理员身份运行本程序或将本程序加入白名单后重试。",
@@ -659,6 +680,21 @@ namespace NotepadReplacer
                     pnlStatus.Top = 484;
                     pnlFooter.Top = 538;
                 }
+            }
+
+            void ShowTempStatus(string message)
+            {
+                if (tempStatusTimer == null)
+                {
+                    tempStatusTimer = new System.Windows.Forms.Timer();
+                    tempStatusTimer.Interval = 2000;
+                    tempStatusTimer.Tick += (s, e) => { tempStatusTimer.Stop(); RefreshStatus(); };
+                }
+                pnlStatus.BackColor = CGreenBg;
+                lblStatus1.ForeColor = Color.FromArgb(0x14, 0x5A, 0x32);
+                lblStatus1.Text = message;
+                lblStatus2.Text = "";
+                tempStatusTimer.Start();
             }
 
             void RefreshStatus()
@@ -771,10 +807,10 @@ namespace NotepadReplacer
                         try { using (var ic = Icon.ExtractAssociatedIcon(Application.ExecutablePath)) g.DrawImage(ic.ToBitmap(), new Rectangle(16, 19, 38, 38)); } catch { }
                         using (var f = new Font("Segoe UI", 14, FontStyle.Bold))
                         using (var b = new SolidBrush(Color.White))
-                            g.DrawString("NotepadReplacer", f, b, 64, 14);
+                            g.DrawString("记事本替换工具", f, b, 64, 14);
                         using (var f2 = new Font("Segoe UI", 9))
                         using (var b2 = new SolidBrush(Color.FromArgb(0xE0, 0xE7, 0xFF)))
-                            g.DrawString(AppName + " · 用你喜欢的编辑器接管系统记事本", f2, b2, 64, 42);
+                            g.DrawString("用你喜欢的编辑器接管系统记事本", f2, b2, 64, 42);
                     };
                     this.Controls.Add(pnl);
 
